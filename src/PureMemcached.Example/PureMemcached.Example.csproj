@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net5.0</TargetFramework>
+        <OutputType>Exe</OutputType>
+        <Nullable>enable</Nullable>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\PureMemcached\PureMemcached.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <PackageReference Include="EnyimMemcachedCore" Version="2.5.3" />
+    </ItemGroup>
+
+</Project>
