@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using PureMemcached.Protocol;
 using Xunit;
 
 // ReSharper disable HeapView.BoxingAllocation

@@ -1,30 +1,25 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-
+using FluentAssertions;
+using PureMemcached.Protocol;
 using Xunit;
 
 namespace PureMemcached.Test
 {
     public unsafe class ResponseReaderTest
     {
-        private static TestResponse CreateResponse(ResponseHeader header, Stream body) =>
-            new(header, body);
-
         [Fact]
         public void Read_OnEmptyStream_ShouldThrowException()
         {
-            Assert.Throws<ArgumentNullException>(() =>
-            {
-                new BinaryProtocolReader(null);
-            });
+            Assert.Throws<ArgumentNullException>(() => { new BinaryProtocolReader(null); });
         }
 
         [Fact]
         public void Read_OnStreamWithoutHeader_ShouldThrowException()
         {
             var reader = new BinaryProtocolReader(Stream.Null);
- 
+
             Assert.Throws<IOException>(() => reader.Read());
         }
 
@@ -37,7 +32,7 @@ namespace PureMemcached.Test
         }
 
         [Theory]
-        [MemberData(nameof(GetResponses))]
+        [MemberData(nameof(GetValidResponses))]
         internal void Read_ValidResponse(Stream stream, ulong cas, uint requestId, Status status, OpCode opCode,
             byte[] expectedExtra, byte[] expectedKey, byte[] expectedValue)
         {
@@ -47,9 +42,9 @@ namespace PureMemcached.Test
 
             byte[] ReadToEnd(ReadDelegate action)
             {
-                var m = new MemoryStream(1024); 
-                m.Position = action(m.GetBuffer());
-                return m.ToArray();
+                var m = new byte[1024];
+                var written = action(m);
+                return m[..written];
             }
 
             Assert.Equal(cas, response.Cas);
@@ -61,37 +56,43 @@ namespace PureMemcached.Test
             Assert.Equal(expectedValue, ReadToEnd(response.ReadBody));
         }
 
-        private delegate int ReadDelegate(Span<byte> buffer);
-        
-        private class TestResponse : Response
+        [Fact]
+        internal void Read_InvalidMagic_ShouldThrowException()
         {
-            public TestResponse(ResponseHeader header, Stream body) : base(header, body)
+            var stream = new MemoryStream(new byte[]
             {
-            }
+                0x85, 0x00, 0x00, 0x00,
+                0x04, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x09,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x01,
+                0xde, 0xad, 0xbe, 0xef,
+                0x57, 0x6f, 0x72, 0x6c,
+                0x64
+            });
 
-            public byte[] GetExtra()
-            {
-                var buffer = new byte[Header.ExtraLength];
-                ReadExtra(buffer);
-                return buffer;
-            }
 
-            public byte[] GetKey()
+            this.Invoking(_ =>
             {
-                var buffer = new byte[Header.KeyLength];
-                ReadKey(buffer);
-                return buffer;
-            }
-            
-            public byte[] GetValue()
-            {
-                var buffer = new byte[Header.TotalSize - (Header.KeyLength + Header.ExtraLength)];
-                ReadBody(buffer);
-                return buffer;
-            }
+                var reader = new BinaryProtocolReader(stream);
+                return reader.Read();
+            }).Should().Throw<IOException>();
         }
 
-        public static IEnumerable<object[]> GetResponses()
+        [Theory]
+        [MemberData(nameof(GetInvalidResponses))]
+        internal void Read_InvalidResponse(Stream stream, Status status)
+        {
+            var reader = new BinaryProtocolReader(stream);
+
+            var response = reader.Read();
+            response.Status.Should().Be(status);
+        }
+
+        private delegate int ReadDelegate(Span<byte> buffer);
+
+        public static IEnumerable<object[]> GetValidResponses()
         {
             yield return new object[]
             {
@@ -111,6 +112,26 @@ namespace PureMemcached.Test
                 new byte[] { 0xde, 0xad, 0xbe, 0xef },
                 Array.Empty<byte>(),
                 new byte[] { 0x57, 0x6f, 0x72, 0x6c, 0x64 }
+            };
+        }
+
+        public static IEnumerable<object[]> GetInvalidResponses()
+        {
+            yield return new object[]
+            {
+                new MemoryStream(new byte[]
+                {
+                    0x81, 0x00, 0x00, 0x00,
+                    0x04, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x09,
+                    0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x01,
+                    0xde, 0xad, 0xbe, 0xef,
+                    0x57, 0x6f, 0x72, 0x6c,
+                    0x64
+                }),
+                Status.ItemNotStored
             };
         }
     }
