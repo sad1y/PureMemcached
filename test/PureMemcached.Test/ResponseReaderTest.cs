@@ -72,7 +72,6 @@ namespace PureMemcached.Test
                 0x64
             });
 
-
             this.Invoking(_ =>
             {
                 var reader = new BinaryProtocolReader(stream);

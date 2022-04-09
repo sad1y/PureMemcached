@@ -27,7 +27,6 @@ namespace PureMemcached
             set => throw new NotSupportedException();
         }
 
-
         public MemorySegmentStream(ArrayPool<byte> allocator, int initialSize = 4096)
         {
             _allocator = allocator;
@@ -82,7 +81,7 @@ namespace PureMemcached
 
             while (count > 0)
             {
-                // if no space left in current buffer or its not worth to spend time to copy small chunk
+                // if no space left in current buffer or it is not worth to spend time to copy small chunk
                 var spaceLeft = currentSegment.SpaceLeft;
                 if (spaceLeft < writeThreshold && count > writeThreshold)
                 {
@@ -92,11 +91,9 @@ namespace PureMemcached
                     var previousBlockSize = currentSegment.Data.Length;
                     currentSegment = ref _segments[_segmentsCount];
 
-                    if (currentSegment.Data == null)
-                    {
-                        var nextBufferSize = Math.Max(count, previousBlockSize);
-                        _segments[_segmentsCount] = new BufferSegment(_allocator.Rent(nextBufferSize));
-                    }
+                    var nextBufferSize = Math.Max(count, previousBlockSize);
+                    _segments[_segmentsCount] = new BufferSegment(_allocator.Rent(nextBufferSize));
+                    
                     currentSegment = ref _segments[_segmentsCount];
                     _segmentsCount++;
                 }
@@ -129,14 +126,14 @@ namespace PureMemcached
             return true;
         }
 
-        public void Reset()
+        internal void Reset()
         {
             for (var i = 0; i < _segmentsCount; i++)
             {
                 ref var seg = ref _segments[i];
                 seg.Offset = 0;
             }
-            
+
             _length = 0;
             _position = new SegmentPosition();
             _segmentsCount = 1;

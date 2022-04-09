@@ -8,30 +8,30 @@ namespace PureMemcached
 {
     public class Response : IDisposable
     {
-        protected readonly ResponseHeader Header;
-        protected readonly Stream Body;
+        private readonly ResponseHeader _header;
+        private readonly Stream _body;
         private uint _offset;
         public bool InvalidCas { get; private set; }
 
-        public Status Status => Header.Status;
+        public Status Status => _header.Status;
         
-        public ulong Cas => Header.Cas;
+        public ulong Cas => _header.Cas;
 
-        public uint RequestId => Header.RequestId;
+        public uint RequestId => _header.RequestId;
         
-        public uint KeyLength => Header.KeyLength;
+        public uint KeyLength => _header.KeyLength;
         
-        public long BodyLength => Header.TotalSize - (Header.KeyLength + Header.ExtraLength);
+        public long BodyLength => _header.TotalSize - (_header.KeyLength + _header.ExtraLength);
         
-        public uint ExtraLength => Header.ExtraLength;
+        public uint ExtraLength => _header.ExtraLength;
         
-        public OpCode OpCode => Header.OpCode;
-        internal long TotalSize => Header.TotalSize;
+        public OpCode OpCode => _header.OpCode;
+        internal long TotalSize => _header.TotalSize;
 
         internal Response(ResponseHeader header, Stream body)
         {
-            Header = header;
-            Body = body;
+            _header = header;
+            _body = body;
             _offset = 0; // because we had already read header
         }
 
@@ -44,26 +44,26 @@ namespace PureMemcached
         
         public string ReadErrorAsString()
         {
-            var otherLen = (Header.ExtraLength + Header.KeyLength);
+            var otherLen = (_header.ExtraLength + _header.KeyLength);
 
             if (_offset > otherLen)
                 throw new IOException("cannot read error");
             
-            var len = (int)Header.TotalSize - otherLen;
+            var len = (int)_header.TotalSize - otherLen;
 
             Span<byte> errorBuffer = stackalloc byte[len];
             
             // move strait to error message, and skip anything 
             if (_offset < otherLen)
-                Body.Read(errorBuffer);
+                _body.Read(errorBuffer);
 
-            var read = Body.Read(errorBuffer);
+            var read = _body.Read(errorBuffer);
             var offset = 0;
             
             while (read > 0 && read + offset < len)
             {
                 offset += read; 
-                read = Body.Read(errorBuffer[offset..]);
+                read = _body.Read(errorBuffer[offset..]);
             }
 
             return Encoding.UTF8.GetString(errorBuffer);
@@ -75,7 +75,7 @@ namespace PureMemcached
         /// <param name="buffer"></param>
         /// <returns>bytes read</returns>
         public int ReadError(Span<byte> buffer) =>
-            Read(buffer, Header.TotalSize);
+            Read(buffer, _header.TotalSize);
 
         /// <summary>
         /// read extra from response. should be used first if `HasError` equals false   
@@ -83,7 +83,7 @@ namespace PureMemcached
         /// <param name="buffer"></param>
         /// <returns>bytes read</returns>
         public int ReadExtra(Span<byte> buffer) =>
-            Read(buffer, Header.ExtraLength);
+            Read(buffer, _header.ExtraLength);
 
         /// <summary>
         /// read key from response. should be used after `ReadExtra` method   
@@ -91,7 +91,7 @@ namespace PureMemcached
         /// <param name="buffer"></param>
         /// <returns>bytes read</returns>
         public int ReadKey(Span<byte> buffer) =>
-            Read(buffer, Header.KeyLength);
+            Read(buffer, _header.KeyLength);
 
         /// <summary>
         /// read value from response   
@@ -100,10 +100,10 @@ namespace PureMemcached
         /// <returns>bytes read</returns>
         public int ReadBody(Span<byte> buffer)
         {
-            if (Header.KeyLength + Header.ExtraLength > _offset)
+            if (_header.KeyLength + _header.ExtraLength > _offset)
                 throw new IOException("Response contains key or extra data. You should read it first");
 
-            return Read(buffer, Header.TotalSize);
+            return Read(buffer, _header.TotalSize);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -113,14 +113,14 @@ namespace PureMemcached
 
             var left = (int)(limit - _offset);
             buffer = buffer.Length > left ? buffer[..left] : buffer;
-            var read = Body.Read(buffer);
+            var read = _body.Read(buffer);
             _offset += (uint)read;
             return read;
         }
 
         public void Dispose()
         {
-            Body.Dispose();
+            _body.Dispose();
         }
     }
 }

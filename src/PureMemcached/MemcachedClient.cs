@@ -1,44 +1,27 @@
 using System;
 using System.Buffers;
 using System.IO;
-using System.Net;
-using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using PureMemcached.Protocol;
 
 namespace PureMemcached
 {
     public class MemcachedClient : IAsyncDisposable
     {
-        private readonly Socket _socket;
+        private readonly Connection _connection;
+        private readonly ObjectPool<MemcachedClient>? _parent;
+        private readonly ArrayPool<byte> _allocator;
 
-        private readonly int _responseBufferSize;
-
-        // private static readonly RecyclableMemoryStreamManager MemoryManager = new();
-        private static readonly ArrayPool<byte> ArrayPool = ArrayPool<byte>.Create(4096, 16);
-
-        public MemcachedClient(string host,
-            int port = 11211,
-            int responseBufferSize = 4096,
-            int sendBufferSize = 1024,
-            TimeSpan sendTimeout = default,
-            TimeSpan receiveTimeout = default
-        )
+        public MemcachedClient(Connection connection, int blockSize = 4096, ObjectPool<MemcachedClient>? parent = null)
         {
-            _responseBufferSize = responseBufferSize;
-
-            var ipHostInfo = Dns.GetHostEntry(host);
-            var ipAddress = ipHostInfo.AddressList[0];
-            var endpoint = new IPEndPoint(ipAddress, port);
-
-            _socket = new Socket(ipAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-            _socket.Blocking = false;
-            _socket.ReceiveBufferSize = responseBufferSize;
-            _socket.SendBufferSize = sendBufferSize;
-            _socket.ReceiveTimeout = sendTimeout == TimeSpan.Zero ? 1000 : (int)receiveTimeout.TotalMilliseconds;
-            _socket.SendTimeout = sendTimeout == TimeSpan.Zero ? 1000 : (int)sendTimeout.TotalMilliseconds;
-            _socket.ConnectAsync(endpoint).Wait();
+            
+            _connection = connection ?? throw new ArgumentNullException(nameof(connection));
+            _allocator = ArrayPool<byte>.Create(blockSize, 16);
+            _parent = parent;
         }
+
+        public bool IsConnected() => _connection.IsHealthy;
 
         public Task<Response> Get(in ReadOnlySpan<byte> key, uint requestId = 0, ulong cas = 0, CancellationToken token = default)
         {
@@ -53,14 +36,26 @@ namespace PureMemcached
             return SendCommand(ref request, token);
         }
 
+        public ValueTask DisposeAsync()
+        {
+            if (_parent != null)
+                return _parent.ReturnAsync(this);
+
+            Release();
+
+            return new ValueTask();
+        }
+
+        internal void Release() => _connection.Dispose();
+
         private Task<Response> SendCommand(ref Request request, CancellationToken token)
         {
-            var pooledStream = new MemorySegmentStream(ArrayPool);
+            var pooledStream = new MemorySegmentStream(_allocator);
             var writer = new BinaryProtocolWriter(pooledStream);
             writer.Write(ref request);
 
             var ts = new TaskCompletionSource<Response>();
-            StartSend(new SendState(_socket, pooledStream, ts, token));
+            StartSend(new SendState(_connection, pooledStream, _allocator, ts, token));
 
             return ts.Task;
         }
@@ -70,7 +65,10 @@ namespace PureMemcached
             try
             {
                 if (state.Token.IsCancellationRequested)
-                    throw new TaskCanceledException();
+                {
+                    state.MarkAsFailed(new TaskCanceledException());
+                    return;
+                }
 
                 if (state.Stream.TryGetBuffer(out var segment, state.Block))
                 {
@@ -84,31 +82,30 @@ namespace PureMemcached
                         return;
                     }
 
-                    state.Socket.BeginSend(
-                        segment.Array!, state.Offset, len,
-                        SocketFlags.None,
-                        out var error,
-                        CompleteSend, state);
-
-                    if (error is not (SocketError.Success or SocketError.IOPending))
-                        throw new SocketException((int)error);
+                    state.Connection.BeginSend(
+                        segment.Array!, state.Offset, len, CompleteSend, state);
                 }
                 else
-                    throw new IOException("failed to get stream data");
+                    throw new MemcachedClientException("failed to get stream data");
             }
             catch (Exception ex)
             {
-                state.Stream.Dispose();
-                state.Task.SetException(ex);
+                state.MarkAsFailed(new MemcachedClientException("cannot send request", ex));
             }
         }
 
         private static void CompleteSend(IAsyncResult asyncResult)
         {
             var state = (SendState)asyncResult.AsyncState;
-            var sent = state.Socket.EndSend(asyncResult);
+            var sent = state.Connection.Complete(asyncResult);
 
             state.Sent += sent;
+
+            if (state.Token.IsCancellationRequested)
+            {
+                state.MarkAsFailed(new TaskCanceledException());
+                return;
+            }
 
             if (sent > 0 && !state.IsComplete)
             {
@@ -117,22 +114,18 @@ namespace PureMemcached
                 return;
             }
 
-            if (state.Token.IsCancellationRequested)
-                throw new TaskCanceledException();
-
-            var buffer = ArrayPool.Rent(4096);
+            var buffer = state.Allocator.Rent(4096);
             try
             {
                 state.Stream.Reset();
-                state.Socket.BeginReceive(buffer, 0, buffer.Length, SocketFlags.None,
+                state.Connection.BeginReceive(buffer, 0, buffer.Length,
                     CompleteReceive,
-                    new ReceiveState(state.Socket, buffer, state.Stream, state.Task, state.Token));
+                    new ReceiveState(state.Connection, buffer, state.Stream, state.Allocator, state.Task, state.Token));
             }
             catch (Exception ex)
             {
-                ArrayPool.Return(buffer);
-                state.Stream.Dispose();
-                state.Task.SetException(ex);
+                state.Allocator.Return(buffer);
+                state.MarkAsFailed(new MemcachedClientException("cannot complete send", ex) );
             }
         }
 
@@ -142,7 +135,7 @@ namespace PureMemcached
 
             try
             {
-                var read = state.Socket.EndSend(asyncResult);
+                var read = state.Socket.Complete(asyncResult);
 
                 if (state.Token.IsCancellationRequested)
                     throw new TaskCanceledException();
@@ -155,9 +148,9 @@ namespace PureMemcached
                     {
                         if (state.Response == null)
                         {
-                            if (read < sizeof(ResponseHeader))
+                            if (state.Stream.Length < sizeof(ResponseHeader))
                             {
-                                state.Socket.BeginReceive(state.Buffer, 0, state.Buffer.Length, SocketFlags.None, CompleteReceive, state);
+                                state.Socket.BeginReceive(state.Buffer, 0, state.Buffer.Length, CompleteReceive, state);
                                 return;
                             }
 
@@ -165,76 +158,82 @@ namespace PureMemcached
                             state.Response = reader.Read();
                         }
 
-                        if (state.Response.TotalSize > state.Stream.Length)
+                        if (state.Response.TotalSize > state.Stream.Length - sizeof(ResponseHeader))
                         {
-                            state.Socket.BeginReceive(state.Buffer, 0, state.Buffer.Length, SocketFlags.None, CompleteReceive, state);
+                            state.Socket.BeginReceive(state.Buffer, 0, state.Buffer.Length, CompleteReceive, state);
                             return;
                         }
                     }
                 }
 
+                state.Allocator.Return(state.Buffer);
+
                 if (state.Response != null)
-                {
                     state.Task.SetResult(state.Response);
-                }
                 else
-                    state.Task.SetException(new IOException("cannot read response"));
-                
-                ArrayPool.Return(state.Buffer);
+                    state.Task.SetException(new MemcachedClientException("cannot read response"));
             }
             catch (Exception ex)
             {
-                ArrayPool.Return(state.Buffer);
+                state.Allocator.Return(state.Buffer);
                 state.Stream.Dispose();
-                state.Task.SetException(ex);
+                state.Task.SetException(new MemcachedClientException("cannot complete receive", ex));
             }
         }
 
-        public ValueTask DisposeAsync()
+        internal class ReceiveState
         {
-            _socket.Disconnect(true);
-            _socket.Dispose();
-            return new ValueTask();
-        }
+            internal readonly Connection Socket;
+            internal readonly byte[] Buffer;
+            internal readonly MemorySegmentStream Stream;
+            internal readonly TaskCompletionSource<Response> Task;
+            internal readonly CancellationToken Token;
+            internal readonly ArrayPool<byte> Allocator;
+            internal Response? Response;
 
-        private class ReceiveState
-        {
-            public readonly Socket Socket;
-            public readonly byte[] Buffer;
-            public readonly MemorySegmentStream Stream;
-            public readonly TaskCompletionSource<Response> Task;
-            public readonly CancellationToken Token;
-            public Response? Response;
-
-            public ReceiveState(Socket socket, byte[] buffer, MemorySegmentStream segmentStream, TaskCompletionSource<Response> task,
+            public ReceiveState(Connection socket, byte[] buffer, MemorySegmentStream stream, ArrayPool<byte> allocator,
+                TaskCompletionSource<Response> task,
                 CancellationToken token)
             {
                 Socket = socket;
                 Buffer = buffer;
-                Stream = segmentStream;
+                Allocator = allocator;
+                Stream = stream;
                 Task = task;
                 Token = token;
             }
         }
 
-        private class SendState
+        internal class SendState
         {
-            public readonly Socket Socket;
-            public readonly MemorySegmentStream Stream;
-            public readonly TaskCompletionSource<Response> Task;
-            public readonly CancellationToken Token;
-            public int Block;
-            public int Offset;
-            public int Sent;
+            internal readonly Connection Connection;
+            internal readonly MemorySegmentStream Stream;
+            internal readonly TaskCompletionSource<Response> Task;
+            internal readonly CancellationToken Token;
+            internal readonly ArrayPool<byte> Allocator;
+            internal int Block;
+            internal int Offset;
+            internal int Sent;
 
             public bool IsComplete => Stream.Length == Sent;
 
-            public SendState(Socket socket, MemorySegmentStream segmentStream, TaskCompletionSource<Response> task, CancellationToken token)
+            public SendState(Connection connection,
+                MemorySegmentStream stream,
+                ArrayPool<byte> allocator,
+                TaskCompletionSource<Response> task,
+                CancellationToken token)
             {
-                Socket = socket;
-                Stream = segmentStream;
+                Connection = connection;
+                Stream = stream;
                 Task = task;
                 Token = token;
+                Allocator = allocator;
+            }
+
+            public void MarkAsFailed(Exception exception)
+            {
+                Stream.Dispose();
+                Task.SetException(exception);
             }
         }
     }
