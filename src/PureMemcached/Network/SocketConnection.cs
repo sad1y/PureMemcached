@@ -45,7 +45,7 @@ public class SocketConnection : Connection
         return read;
     }
 
-    public override bool IsHealthy => _socket.Connected;
+    public override bool IsReady => _socket.Connected;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void EnsureSuccessCode(SocketError error)

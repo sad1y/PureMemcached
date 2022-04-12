@@ -4,7 +4,7 @@ using System.Threading.Tasks;
 
 namespace PureMemcached.Network;
 
-public class SocketConnectionFactory : ConnectionFactory<SocketConnection>
+public class SocketConnectionFactory : IConnectionFactory
 {
     private readonly string _host;
     private readonly int _port;
@@ -47,15 +47,11 @@ public class SocketConnectionFactory : ConnectionFactory<SocketConnection>
         return _endpoint ?? throw new InvalidOperationException("cannot get ip endpoint");
     }
 
-    public override async Task<SocketConnection> CreateAsync()
+    public async Task<Connection> CreateAsync()
     {
         var ipAddress = await GetEndpointAsync();
         var connection = new SocketConnection(ipAddress, _responseBufferSize, _sendBufferSize, _sendTimeoutMs, _receiveTimeoutMs);
         await connection.Connect();
         return connection;
-    }
-
-    public void Dispose()
-    {
     }
 }

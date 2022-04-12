@@ -20,7 +20,7 @@ public abstract class Connection : IDisposable
     
     public abstract int Complete(IAsyncResult result);
     
-    public abstract bool IsHealthy { get; } 
+    public abstract bool IsReady { get; } 
 
     protected abstract void Dispose(bool disposing);
 

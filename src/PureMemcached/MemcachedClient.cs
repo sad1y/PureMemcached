@@ -1,6 +1,5 @@
 using System;
 using System.Buffers;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using PureMemcached.Protocol;
@@ -10,18 +9,21 @@ namespace PureMemcached
     public class MemcachedClient : IAsyncDisposable
     {
         private readonly Connection _connection;
-        private readonly ObjectPool<MemcachedClient>? _parent;
+        private readonly IObjectPool<MemcachedClient>? _parent;
         private readonly ArrayPool<byte> _allocator;
+        private volatile bool _disposed;
+        private int _canHandleNextCommand = 1;
 
-        public MemcachedClient(Connection connection, int blockSize = 4096, ObjectPool<MemcachedClient>? parent = null)
+        private static readonly unsafe int ResponseHeaderSize = sizeof(ResponseHeader);
+
+        public MemcachedClient(Connection connection, int blockSize = 4096, IObjectPool<MemcachedClient>? parent = null)
         {
-            
             _connection = connection ?? throw new ArgumentNullException(nameof(connection));
             _allocator = ArrayPool<byte>.Create(blockSize, 16);
             _parent = parent;
         }
 
-        public bool IsConnected() => _connection.IsHealthy;
+        public bool IsReady() => !_disposed && _canHandleNextCommand == 1 && _connection.IsReady;
 
         public Task<Response> Get(in ReadOnlySpan<byte> key, uint requestId = 0, ulong cas = 0, CancellationToken token = default)
         {
@@ -42,14 +44,30 @@ namespace PureMemcached
                 return _parent.ReturnAsync(this);
 
             Release();
-
             return new ValueTask();
         }
 
-        internal void Release() => _connection.Dispose();
+        internal void Release()
+        {
+            try
+            {
+                if (_disposed)
+                    return;
+
+                _disposed = true;
+                _connection.Dispose();
+            }
+            finally
+            {
+                GC.SuppressFinalize(this);
+            }
+        }
 
         private Task<Response> SendCommand(ref Request request, CancellationToken token)
         {
+            if (Interlocked.CompareExchange(ref _canHandleNextCommand, 0, 1) == 0)
+                throw new MemcachedClientException("Cannot send command. Previous operation has not completed yet");
+
             var pooledStream = new MemorySegmentStream(_allocator);
             var writer = new BinaryProtocolWriter(pooledStream);
             writer.Write(ref request);
@@ -57,7 +75,18 @@ namespace PureMemcached
             var ts = new TaskCompletionSource<Response>();
             StartSend(new SendState(_connection, pooledStream, _allocator, ts, token));
 
-            return ts.Task;
+            return ts.Task.ContinueWith((task, state) =>
+            {
+                var client = (MemcachedClient)state;
+                client.MakeItAvailable();
+                return task.Result;
+            }, this, token);
+        }
+
+        private void MakeItAvailable()
+        {
+            if (Interlocked.CompareExchange(ref _canHandleNextCommand, 1, 0) == 1)
+                throw new MemcachedClientException("Cannot reset client state");
         }
 
         private static void StartSend(SendState state)
@@ -125,7 +154,7 @@ namespace PureMemcached
             catch (Exception ex)
             {
                 state.Allocator.Return(buffer);
-                state.MarkAsFailed(new MemcachedClientException("cannot complete send", ex) );
+                state.MarkAsFailed(new MemcachedClientException("cannot complete send", ex));
             }
         }
 
@@ -144,25 +173,22 @@ namespace PureMemcached
 
                 if (read > 0)
                 {
-                    unsafe
+                    if (state.Response == null)
                     {
-                        if (state.Response == null)
-                        {
-                            if (state.Stream.Length < sizeof(ResponseHeader))
-                            {
-                                state.Socket.BeginReceive(state.Buffer, 0, state.Buffer.Length, CompleteReceive, state);
-                                return;
-                            }
-
-                            var reader = new BinaryProtocolReader(state.Stream);
-                            state.Response = reader.Read();
-                        }
-
-                        if (state.Response.TotalSize > state.Stream.Length - sizeof(ResponseHeader))
+                        if (state.Stream.Length < ResponseHeaderSize)
                         {
                             state.Socket.BeginReceive(state.Buffer, 0, state.Buffer.Length, CompleteReceive, state);
                             return;
                         }
+
+                        var reader = new BinaryProtocolReader(state.Stream);
+                        state.Response = reader.Read();
+                    }
+
+                    if (state.Response.TotalSize > state.Stream.Length - ResponseHeaderSize)
+                    {
+                        state.Socket.BeginReceive(state.Buffer, 0, state.Buffer.Length, CompleteReceive, state);
+                        return;
                     }
                 }
 
@@ -171,13 +197,13 @@ namespace PureMemcached
                 if (state.Response != null)
                     state.Task.SetResult(state.Response);
                 else
-                    state.Task.SetException(new MemcachedClientException("cannot read response"));
+                    state.Task.SetException(new MemcachedClientException("Response does not have header"));
             }
             catch (Exception ex)
             {
                 state.Allocator.Return(state.Buffer);
                 state.Stream.Dispose();
-                state.Task.SetException(new MemcachedClientException("cannot complete receive", ex));
+                state.Task.SetException(new MemcachedClientException("Cannot complete receive", ex));
             }
         }
 

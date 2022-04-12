@@ -2,6 +2,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
+using Moq;
 using PureMemcached.Protocol;
 using Xunit;
 
@@ -65,6 +66,17 @@ public partial class MemcachedClientTest
         expectedFlow.AssertThatThereIsNoStatesLeft();
     }
 
+    [Fact]
+    public async Task Get_CallAgainBeforeClientReady_ShouldThrowException()
+    {
+        await using var client = new MemcachedClient(Mock.Of<Connection>(), blockSize: 128);
+        client.Get(CreateRequestBuffer(new Request()));
+        
+        var act = () => { client.Get(CreateRequestBuffer(new Request())); };
+        
+        act.Should().Throw<MemcachedClientException>();
+    }
+    
     [Fact]
     public async Task Get_FailedToSendRequest_ShouldThrowException()
     {

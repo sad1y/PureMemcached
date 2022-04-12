@@ -38,7 +38,7 @@ public partial class MemcachedClientTest
 
         public override int Complete(IAsyncResult result) => _flow.ValidateAndExecute<int, CompleteState>(new CompleteState(), result);
 
-        public override bool IsHealthy { get; }
+        public override bool IsReady { get; }
 
         protected override void Dispose(bool disposing)
         {
