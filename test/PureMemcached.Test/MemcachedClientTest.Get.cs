@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -73,10 +74,30 @@ public partial class MemcachedClientTest
         client.Get(CreateRequestBuffer(new Request()));
         
         var act = () => { client.Get(CreateRequestBuffer(new Request())); };
-        
+
         act.Should().Throw<MemcachedClientException>();
     }
+
+    [Fact]
+    public async Task Get_EmptyKey_ShouldThrowException()
+    {
+        await using var client = new MemcachedClient(Mock.Of<Connection>(), blockSize: 128);
+
+        var act = () => { client.Get(Array.Empty<byte>()); };
+
+        act.Should().Throw<KeyNotValidException>();
+    }
     
+    [Fact]
+    public async Task Get_TooLongKey_ShouldThrowException()
+    {
+        await using var client = new MemcachedClient(Mock.Of<Connection>(), blockSize: 128);
+
+        var act = () => { client.Get(new byte[255]); };
+
+        act.Should().Throw<KeyNotValidException>();
+    }
+
     [Fact]
     public async Task Get_FailedToSendRequest_ShouldThrowException()
     {

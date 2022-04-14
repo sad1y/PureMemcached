@@ -27,6 +27,8 @@ namespace PureMemcached
 
         public Task<Response> Get(in ReadOnlySpan<byte> key, uint requestId = 0, ulong cas = 0, CancellationToken token = default)
         {
+            ThrowIfKeyIsNotValid(key);
+            
             var request = new Request
             {
                 RequestId = requestId,
@@ -47,6 +49,24 @@ namespace PureMemcached
             return new ValueTask();
         }
 
+        private static void ThrowIfKeyIsNotValid(in ReadOnlySpan<byte> key)
+        {
+            var result = ValidateKey(key);
+            if(result > 0)
+                throw new KeyNotValidException(result);
+        }
+        
+        private static KeyValidationResult ValidateKey(in ReadOnlySpan<byte> key)
+        {
+            if (key.IsEmpty)
+                return KeyValidationResult.Empty;
+
+            if (key.Length > 250)
+                return KeyValidationResult.TooLong;
+            
+            return KeyValidationResult.OK;
+        }
+        
         internal void Release()
         {
             try

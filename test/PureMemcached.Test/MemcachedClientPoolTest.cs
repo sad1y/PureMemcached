@@ -44,7 +44,7 @@ public class MemcachedClientPoolTest
     }
     
     [Fact]
-    public async Task RentAsync_HaveReadyClientThatNotReady_ShouldReleaseIt()
+    public async Task RentAsync_WithClientsThatAreNotReady_ShouldReleaseIt()
     {
         var connection = new Mock<Connection>();
         connection.Setup(f => f.IsReady).Returns(true);
