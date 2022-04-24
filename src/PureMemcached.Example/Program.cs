@@ -1,10 +1,12 @@
 ﻿using System;
+using System.Buffers;
 using System.Diagnostics;
 using System.Linq;
+using System.Text;
 using System.Text.Unicode;
+using System.Threading;
 using System.Threading.Tasks;
 using Enyim.Caching.Configuration;
-using PureMemcached.Network;
 
 
 namespace PureMemcached.Example
@@ -20,7 +22,7 @@ namespace PureMemcached.Example
             timer.Restart();
             await EnyimClient("hello");
             var t2 = timer.Elapsed;
-            
+
             Console.WriteLine("done in: t1 {0}, t2 {1}", t1, t2);
         }
 
@@ -32,9 +34,9 @@ namespace PureMemcached.Example
                 {
                     Servers = { new Server { Address = "localhost", Port = 11211 } }
                 });
-            
+
             using var client = new Enyim.Caching.MemcachedClient(logger, cfg);
-            await Parallel.ForEachAsync(Enumerable.Range(0, 100_000), new ParallelOptions { MaxDegreeOfParallelism = 8 }, async (a, b) =>
+            await Parallel.ForEachAsync(Enumerable.Range(0, 100000), new ParallelOptions { MaxDegreeOfParallelism = 8 }, async (a, b) =>
             {
                 var response = await client.GetAsync(keyText);
                 Console.WriteLine(response.Value.ToString());
@@ -43,40 +45,46 @@ namespace PureMemcached.Example
 
         private static async Task PureMemcachedClient(string keyText)
         {
-            var socketFactory = new SocketConnectionFactory("localhost", 11211, 1024, 1024, 100, 100, TimeSpan.FromMinutes(5));
-            using var memCachedClientPool = new MemcachedClientPool(socketFactory);
+            await using var client = new MemcachedClient("localhost");
 
-            await Parallel.ForEachAsync(Enumerable.Range(0, 100_000), new ParallelOptions { MaxDegreeOfParallelism = 8 }, async (a, b) =>
+            var key = new byte[32];
+            Utf8.FromUtf16(keyText, key, out _, out var written);
+
+            await Parallel.ForEachAsync(Enumerable.Range(0, 1), new ParallelOptions { MaxDegreeOfParallelism = 8 }, async (a, b) =>
             {
-                var key = new byte[32];
-                Utf8.FromUtf16(keyText, key, out _, out var written);
-                
-                await using var client = await memCachedClientPool.RentAsync();
-                using var response = await client.Get(key.AsSpan()[..written], token: b).ConfigureAwait(false);
+                await using var response = await client.Get(key.AsSpan()[..written], token: b).ConfigureAwait(false);
                 if (response.HasError())
                 {
-                    var error = response.ReadErrorAsString();
-                    Console.WriteLine(error);
+                    var buffer = new ArrayBufferWriter<byte>(256);
+                    await response.CopyErrorAsync(buffer, b);
+                    Console.WriteLine("error {}", Encoding.UTF8.GetString(buffer.WrittenSpan));
                 }
                 else
                 {
-                    static void PrintResult(Response response)
+                    static async Task PrintResult(Response response, CancellationToken token)
                     {
-                        Span<byte> buffer = stackalloc byte[(int)response.ExtraLength];
-                        response.ReadExtra(buffer);
-
-                        var value = string.Create((int)response.BodyLength, response, (span, state) =>
+                        var buffer = ArrayPool<byte>.Shared.Rent((int)response.BodyLength);
+                        try
                         {
-                            Span<byte> value = stackalloc byte[(int)state.BodyLength];
-                            var read = state.ReadBody(value);
+                            await response.SkipExtraAsync(token);
 
-                            Utf8.ToUtf16(value[..read], span, out _, out _);
-                        });
+                            await using var body = response.GetStream();
+                            var offset = 0;
+                            do
+                            {
+                                var read = await body.ReadAsync(buffer.AsMemory(offset), token);
+                                offset += read;
+                            } while (body.Length != body.Position);
 
-                        Console.WriteLine("value: {0}", value);
+                            Console.WriteLine("value: {0}", Encoding.UTF8.GetString(buffer.AsSpan(0, offset)));
+                        }
+                        finally
+                        {
+                            ArrayPool<byte>.Shared.Return(buffer);
+                        }
                     }
 
-                    PrintResult(response);
+                    await PrintResult(response, b);
                 }
             });
         }

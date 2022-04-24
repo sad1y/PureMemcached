@@ -2,64 +2,47 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using FluentAssertions;
-using PureMemcached.Protocol;
 using Xunit;
 
 namespace PureMemcached.Test
 {
-    public unsafe class ResponseReaderTest
+    public partial class ProtocolTest
     {
         [Fact]
         public void Read_OnEmptyStream_ShouldThrowException()
         {
-            Assert.Throws<ArgumentNullException>(() => { new BinaryProtocolReader(null); });
-        }
-
-        [Fact]
-        public void Read_OnStreamWithoutHeader_ShouldThrowException()
-        {
-            var reader = new BinaryProtocolReader(Stream.Null);
-
-            Assert.Throws<IOException>(() => reader.Read());
+            var func = () => Protocol.ReadHeader(ReadOnlySpan<byte>.Empty, out _);
+            func.Should().ThrowExactly<MemcachedClientException>();
         }
 
         [Fact]
         public void Read_OnStreamWithBrokenHeader_ShouldThrowException()
         {
-            var input = new MemoryStream(new byte[32]);
-            var reader = new BinaryProtocolReader(input);
-            Assert.Throws<IOException>(() => reader.Read());
+            var input = new byte[32];
+            var func = () => Protocol.ReadHeader(input, out _);
+            func.Should().ThrowExactly<MemcachedClientException>();
         }
 
         [Theory]
         [MemberData(nameof(GetValidResponses))]
-        internal void Read_ValidResponse(Stream stream, ulong cas, uint requestId, Status status, OpCode opCode,
-            byte[] expectedExtra, byte[] expectedKey, byte[] expectedValue)
+        internal void Read_ValidResponse(byte[] buffer, ulong cas, uint requestId, Status status, OpCode opCode,
+            byte expectedExtraLength, byte expectedKeyLength, uint totalSizeLength)
         {
-            var reader = new BinaryProtocolReader(stream);
+            var header = Protocol.ReadHeader(buffer, out _);
 
-            var response = reader.Read();
-
-            byte[] ReadToEnd(ReadDelegate action)
-            {
-                var m = new byte[1024];
-                var written = action(m);
-                return m[..written];
-            }
-
-            Assert.Equal(cas, response.Cas);
-            Assert.Equal(requestId, response.RequestId);
-            Assert.Equal(status, response.Status);
-            Assert.Equal(opCode, response.OpCode);
-            Assert.Equal(expectedExtra, ReadToEnd(response.ReadExtra));
-            Assert.Equal(expectedKey, ReadToEnd(response.ReadKey));
-            Assert.Equal(expectedValue, ReadToEnd(response.ReadBody));
+            header.Cas.Should().Be(cas);
+            header.RequestId.Should().Be(requestId);
+            header.Status.Should().Be(status);
+            header.OpCode.Should().Be(opCode);
+            header.ExtraLength.Should().Be(expectedExtraLength);
+            header.KeyLength.Should().Be(expectedKeyLength);
+            header.TotalSize.Should().Be(totalSizeLength);
         }
 
         [Fact]
         internal void Read_InvalidMagic_ShouldThrowException()
         {
-            var stream = new MemoryStream(new byte[]
+            var response = new byte[]
             {
                 0x85, 0x00, 0x00, 0x00,
                 0x04, 0x00, 0x00, 0x00,
@@ -70,26 +53,19 @@ namespace PureMemcached.Test
                 0xde, 0xad, 0xbe, 0xef,
                 0x57, 0x6f, 0x72, 0x6c,
                 0x64
-            });
+            };
 
-            this.Invoking(_ =>
-            {
-                var reader = new BinaryProtocolReader(stream);
-                return reader.Read();
-            }).Should().Throw<IOException>();
+            var func = () => Protocol.ReadHeader(response, out _);
+            func.Should().Throw<MemcachedClientException>();
         }
 
         [Theory]
         [MemberData(nameof(GetInvalidResponses))]
-        internal void Read_InvalidResponse(Stream stream, Status status)
+        internal void Read_InvalidResponse(byte[] chunk, Status status)
         {
-            var reader = new BinaryProtocolReader(stream);
-
-            var response = reader.Read();
+            var response = Protocol.ReadHeader(chunk, out _);
             response.Status.Should().Be(status);
         }
-
-        private delegate int ReadDelegate(Span<byte> buffer);
 
         public static IEnumerable<object[]> GetValidResponses()
         {
@@ -118,7 +94,7 @@ namespace PureMemcached.Test
         {
             yield return new object[]
             {
-                new MemoryStream(new byte[]
+                new byte[]
                 {
                     0x81, 0x00, 0x00, 0x00,
                     0x04, 0x00, 0x00, 0x05,
@@ -129,12 +105,12 @@ namespace PureMemcached.Test
                     0xde, 0xad, 0xbe, 0xef,
                     0x57, 0x6f, 0x72, 0x6c,
                     0x64
-                }),
+                },
                 Status.ItemNotStored
             };
             yield return new object[]
             {
-                new MemoryStream(new byte[]
+                new byte[]
                 {
                     0x81, 0x00, 0x00, 0x00,
                     0x04, 0x00, 0x00, 0x01,
@@ -145,12 +121,12 @@ namespace PureMemcached.Test
                     0xde, 0xad, 0xbe, 0xef,
                     0x57, 0x6f, 0x72, 0x6c,
                     0x64
-                }),
+                },
                 Status.KeyNotFound
             };
             yield return new object[]
             {
-                new MemoryStream(new byte[]
+                new byte[]
                 {
                     0x81, 0x00, 0x00, 0x00,
                     0x04, 0x00, 0x00, 0x02,
@@ -161,13 +137,13 @@ namespace PureMemcached.Test
                     0xde, 0xad, 0xbe, 0xef,
                     0x57, 0x6f, 0x72, 0x6c,
                     0x64
-                }),
+                },
                 Status.KeyExists
             };
-            
+
             yield return new object[]
             {
-                new MemoryStream(new byte[]
+                new byte[]
                 {
                     0x81, 0x00, 0x00, 0x00,
                     0x04, 0x00, 0x00, 0x03,
@@ -178,10 +154,10 @@ namespace PureMemcached.Test
                     0xde, 0xad, 0xbe, 0xef,
                     0x57, 0x6f, 0x72, 0x6c,
                     0x64
-                }),
+                },
                 Status.ValueTooLarge
             };
-            
+
             yield return new object[]
             {
                 new MemoryStream(new byte[]
@@ -198,7 +174,7 @@ namespace PureMemcached.Test
                 }),
                 Status.InvalidArguments
             };
-            
+
             yield return new object[]
             {
                 new MemoryStream(new byte[]
@@ -215,7 +191,7 @@ namespace PureMemcached.Test
                 }),
                 Status.IncrDecrOnNonNumericValue
             };
-            
+
             yield return new object[]
             {
                 new MemoryStream(new byte[]
@@ -232,7 +208,7 @@ namespace PureMemcached.Test
                 }),
                 Status.UnknownCommand
             };
-            
+
             yield return new object[]
             {
                 new MemoryStream(new byte[]

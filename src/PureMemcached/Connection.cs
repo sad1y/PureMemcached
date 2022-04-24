@@ -1,34 +1,30 @@
 using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace PureMemcached;
 
-public abstract class Connection : IDisposable
+public abstract class Connection : IAsyncDisposable
 {
-    public abstract void BeginSend(
-        byte[] buffer,
-        int offset,
-        int size,
-        AsyncCallback callback,
-        object state);
+    private readonly IObjectPool<Connection>? _owner;
 
-    public abstract void BeginReceive(
-        byte[] buffer,
-        int offset,
-        int size,
-        AsyncCallback callback,
-        object state);
-    
-    public abstract int Complete(IAsyncResult result);
-    
-    public abstract bool IsReady { get; } 
-
-    protected abstract void Dispose(bool disposing);
-
-    public void Dispose()
+    protected Connection(IObjectPool<Connection>? owner)
     {
-        Dispose(true);
-        GC.SuppressFinalize(this);
+        _owner = owner;
+    }
+
+    public abstract Task<Stream> SendAsync(Stream request, CancellationToken token);
+
+    public abstract bool IsReady { get; }
+
+    protected abstract bool TryRelease();
+
+    public ValueTask DisposeAsync()
+    {
+        if (TryRelease() && _owner != null)
+            return _owner.ReturnAsync(this);
+        
+        return new ValueTask();
     }
 }
-
-

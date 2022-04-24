@@ -1,10 +1,13 @@
 using System;
+using System.Buffers;
+using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Moq;
-using PureMemcached.Protocol;
 using Xunit;
 
 namespace PureMemcached.Test;
@@ -12,141 +15,91 @@ namespace PureMemcached.Test;
 public partial class MemcachedClientTest
 {
     [Fact]
-    public async Task Get_FromSeveralRead_ShouldReturnCompleteResponse()
-    {
-        var key = new byte[] { 0, 2, 6, 1, 8 };
-        var requestByte = CreateRequestBuffer(new Request { RequestId = 2, Cas = 3, Key = key, OpCode = OpCode.Get });
-        var responseByte = new byte[]
-        {
-            0x81, 0x00, 0x00, 0x00,
-            0x04, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x09,
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x01,
-            0xde, 0xad, 0xbe, 0xef,
-            0x57, 0x6f, 0x72, 0x6c,
-            0x64
-        };
-
-        var expectedFlow = new ExecutionFlow
-        {
-            new BeginSendState(requestByte, 0, 29),
-            new CompleteState(6),
-            new BeginSendState(requestByte[6..], 6, 23),
-            new CompleteState(23),
-            new BeginReceiveState(0, 4096),
-            new CompleteReceiveState(1, responseByte[..1]),
-            new BeginReceiveState(0, 4096),
-            new CompleteReceiveState(10, responseByte[1..11]),
-            new BeginReceiveState(0, 4096),
-            new CompleteReceiveState(7, responseByte[11..18]),
-            new BeginReceiveState(0, 4096),
-            new CompleteReceiveState(15, responseByte[18..]),
-        };
-
-        await using var client = new MemcachedClient(new MockConnection(expectedFlow), blockSize: 128);
-
-        var response = await client.Get(key, 2, 3, CancellationToken.None);
-
-        response.Status.Should().Be(Status.NoError);
-
-        var buffer = new byte[16];
-
-        var keyLength = response.ReadKey(buffer);
-        keyLength.Should().Be(0);
-
-        var extraLength = response.ReadExtra(buffer);
-        extraLength.Should().Be(4);
-        buffer[..extraLength].Should().BeEquivalentTo(new byte[] { 0xde, 0xad, 0xbe, 0xef });
-
-        var bodyLength = response.ReadBody(buffer);
-        bodyLength.Should().Be(5);
-        buffer[..bodyLength].Should().BeEquivalentTo(new byte[] { 0x57, 0x6f, 0x72, 0x6c, 0x64 });
-
-        expectedFlow.AssertThatThereIsNoStatesLeft();
-    }
-
-    [Fact]
-    public async Task Get_CallAgainBeforeClientReady_ShouldThrowException()
-    {
-        await using var client = new MemcachedClient(Mock.Of<Connection>(), blockSize: 128);
-        client.Get(CreateRequestBuffer(new Request()));
-        
-        var act = () => { client.Get(CreateRequestBuffer(new Request())); };
-
-        act.Should().Throw<MemcachedClientException>();
-    }
-
-    [Fact]
-    public async Task Get_EmptyKey_ShouldThrowException()
-    {
-        await using var client = new MemcachedClient(Mock.Of<Connection>(), blockSize: 128);
-
-        var act = () => { client.Get(Array.Empty<byte>()); };
-
-        act.Should().Throw<KeyNotValidException>();
-    }
-    
-    [Fact]
-    public async Task Get_TooLongKey_ShouldThrowException()
-    {
-        await using var client = new MemcachedClient(Mock.Of<Connection>(), blockSize: 128);
-
-        var act = () => { client.Get(new byte[255]); };
-
-        act.Should().Throw<KeyNotValidException>();
-    }
-
-    [Fact]
-    public async Task Get_FailedToSendRequest_ShouldThrowException()
-    {
-        var key = new byte[] { 0, 2, 6, 1, 8 };
-
-        var expectedFlow = new ExecutionFlow
-        {
-            new ThrowsExceptionState()
-        };
-
-        await using var client = new MemcachedClient(new MockConnection(expectedFlow), blockSize: 128);
-
-        var act = async () => { await client.Get(key, 2, 3, CancellationToken.None); };
-
-        await act.Should().ThrowAsync<MemcachedClientException>();
-
-        expectedFlow.AssertThatThereIsNoStatesLeft();
-    }
-
-    [Fact]
     public async Task Get_FailedToReadResponse_ShouldThrowException()
     {
-        var key = new byte[] { 0, 2, 6, 1, 8 };
-        var requestByte = CreateRequestBuffer(new Request { RequestId = 2, Cas = 3, Key = key, OpCode = OpCode.Get });
-
-        var expectedFlow = new ExecutionFlow
-        {
-            new BeginSendState(requestByte, 0, 29),
-            new CompleteState(29),
-            new BeginReceiveState(0, 4096),
-            new ThrowsExceptionState()
-        };
-
-        await using var client = new MemcachedClient(new MockConnection(expectedFlow), blockSize: 128);
-
-        var act = async () => { await client.Get(key, 2, 3, CancellationToken.None); };
-
-        await act.Should().ThrowAsync<MemcachedClientException>();
-
-        expectedFlow.AssertThatThereIsNoStatesLeft();
+        await using var client = CreateClient(new[] { BrokenStream() });
+        var act = async () => { await client.Get(new byte[] { 1 }, 2, 3, CancellationToken.None); };
+        await act.Should().ThrowAsync<IOException>();
     }
 
-    private static byte[] CreateRequestBuffer(Request request)
+    [Theory]
+    [MemberData(nameof(GetOperationCases))]
+    public async Task Get_ShouldProperlyReadResponse(uint requestId, ulong cas, byte[] key, byte[] extra, byte[] body)
     {
-        using var mem = new MemoryStream();
+        await using var client = CreateClient(new[] { new StreamWrapper(CreateResponse(requestId, cas, OpCode.Get, key, extra, body)) });
+        var response = await client.Get(new byte[] { 1 }, 2, 3, CancellationToken.None);
 
-        var writer = new BinaryProtocolWriter(mem);
-        writer.Write(ref request);
+        var writer = new ArrayBufferWriter<byte>(256);
 
-        return mem.ToArray();
+        response.Cas.Should().Be(cas);
+        response.RequestId.Should().Be(requestId);
+        response.Status.Should().Be(Status.NoError);
+        await response.CopyExtraAsync(writer, CancellationToken.None);
+        writer.WrittenMemory.ToArray().Should().BeEquivalentTo(extra);
+
+        writer.Clear();
+        await response.CopyKeyAsync(writer, CancellationToken.None);
+        writer.WrittenMemory.ToArray().Should().BeEquivalentTo(key);
+
+        var memoryStream = new MemoryStream();
+        await response.GetStream().CopyToAsync(memoryStream);
+        
+        memoryStream.GetBuffer()[..body.Length].Should().BeEquivalentTo(body);
+        response.GetStream().Length.Should().Be(response.GetStream().Position);
+    }
+
+    public static IEnumerable<object[]> GetOperationCases()
+    {
+        yield return
+            new object[] { (uint)1, (ulong)2, new byte[] { 1, 2, 3 }, new byte[] { 1, 2, 3, 4 }, new byte[] { 3, 5, 6, 7, 91, 0 } };
+    }
+
+    private static MemcachedClient CreateClient(IEnumerable<Stream> responses = null)
+    {
+        var poolMock = new Mock<IObjectPool<Connection>>();
+        var connectionMock = new Mock<Connection>(null);
+
+        var iterator = (responses ?? Enumerable.Empty<Stream>()).GetEnumerator();
+
+        connectionMock.Setup(f => f.SendAsync(It.IsAny<Stream>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => iterator.MoveNext() ? iterator.Current : Stream.Null);
+
+        poolMock.Setup(f => f.RentAsync()).ReturnsAsync(connectionMock.Object);
+
+        return new MemcachedClient(poolMock.Object);
+    }
+
+    private static Stream BrokenStream()
+    {
+        var mock = new Mock<Stream>();
+        mock.Setup(f => f.ReadAsync(It.IsAny<Memory<byte>>(), It.IsAny<CancellationToken>())).ReturnsAsync(() => throw new IOException());
+        return mock.Object;
+    }
+
+    private static byte[] CreateResponse(uint requestId, ulong cas, OpCode code, byte[] key, byte[] extra, byte[]? body)
+    {
+        var totalLength = key.Length + extra.Length + body?.Length ?? 0;
+        var len = Protocol.HeaderSize + totalLength;
+        var buffer = new byte[len];
+
+        var span = buffer.AsSpan();
+
+        buffer[0] = 0x81;
+        buffer[1] = (byte)code;
+        BinaryPrimitives.WriteUInt16BigEndian(span[2..], (ushort)key.Length);
+        buffer[4] = (byte)extra.Length;
+        // skip data_type and reserved
+        BinaryPrimitives.WriteUInt32BigEndian(span[8..12], (uint)totalLength);
+        BinaryPrimitives.WriteUInt32BigEndian(span[12..16], requestId);
+        BinaryPrimitives.WriteUInt64BigEndian(span[16..], cas);
+
+        var offset = Protocol.HeaderSize;
+        extra.CopyTo(span[offset..]);
+        offset += extra.Length;
+        key.CopyTo(span[offset..]);
+        offset += key.Length;
+        body.CopyTo(span[offset..]);
+
+        return buffer;
     }
 }

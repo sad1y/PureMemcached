@@ -33,6 +33,6 @@ namespace PureMemcached
         /// <summary>
         /// Value (as needed), should be empty if not needed 
         /// </summary>
-        public Stream Value { get; set; }
+        public Stream? Payload { get; set; }
     }
 }
