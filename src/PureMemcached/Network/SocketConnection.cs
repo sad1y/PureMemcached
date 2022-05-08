@@ -1,8 +1,8 @@
 using System;
-using System.Buffers;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -10,8 +10,7 @@ namespace PureMemcached.Network;
 
 public class SocketConnection : Connection, IEquatable<SocketConnection>
 {
-    private const int MaxBufferSize = 1024;
-    private static readonly ArrayPool<byte> BufferPool = ArrayPool<byte>.Create(MaxBufferSize, 100);
+    private static readonly byte[] Buffer = new byte[4096];
 
     private readonly EndPoint _endPoint;
     private readonly Socket _socket;
@@ -36,39 +35,42 @@ public class SocketConnection : Connection, IEquatable<SocketConnection>
     /// <param name="request"></param>
     /// <param name="token"></param>
     /// <returns></returns>
-    public override Task<Stream> SendAsync(Stream request, CancellationToken token)
+    public override async Task<Stream> SendAsync(Stream request, CancellationToken token)
     {
-        // we need to protect the current send session, in other way we may see garbage in response
+        // call of this method must be exclusive in another way you may see garbage in response
         if (Interlocked.CompareExchange(ref _status, InProgress, Ready) != Ready)
             throw new MemcachedClientException("You cannot send any data while the previous operation is not complete");
 
-        async Task<Stream> TransmitData(Stream stream, CancellationToken cancellationToken)
+        var read = 0;
+        var toSend = 0;
+        do
         {
-            var buffer = BufferPool.Rent((int)Math.Min(stream.Length, MaxBufferSize));
-            var sentTotal = 0;
-            try
+            read = await request.ReadAsync(Buffer.AsMemory(toSend), token).ConfigureAwait(false);
+            toSend += read;
+
+            // wait until buffer is full 
+            if (toSend == Buffer.Length)
             {
-                while (sentTotal != stream.Length)
-                {
-                    var sent = 0;
-                    var read = await stream.ReadAsync(buffer, cancellationToken);
-                    do
-                    {
-                        sent += await _socket.SendAsync(buffer.AsMemory(0, read), SocketFlags.None, cancellationToken);
-                    } while (read > sent);
-
-                    sentTotal += sent;
-                }
-
-                return new ReadOnlySocketStream(_socket, this);
+                await SendBufferAsync(toSend, token).ConfigureAwait(false);
+                toSend = 0;
             }
-            finally
-            {
-                BufferPool.Return(buffer);
-            }
-        }
+        } while (read > 0);
 
-        return TransmitData(request, token);
+        // send if something is left
+        if (toSend > 0)
+            await SendBufferAsync(toSend, token).ConfigureAwait(false);
+
+        return new ReadOnlySocketStream(_socket, this);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private async ValueTask SendBufferAsync(int size, CancellationToken token)
+    {
+        var sent = size;
+        do
+        {
+            sent -= await _socket.SendAsync(Buffer.AsMemory(size - sent, sent), SocketFlags.None, token).ConfigureAwait(false);
+        } while (sent != 0);
     }
 
     public bool Equals(SocketConnection? other)
@@ -100,7 +102,7 @@ public class SocketConnection : Connection, IEquatable<SocketConnection>
     }
 
     public Task Connect() => _socket.Connected ? Task.CompletedTask : _socket.ConnectAsync(_endPoint);
-    
+
     public override bool IsReady => _status == Ready && _socket.Connected;
 
     protected override bool TryRelease()
@@ -110,7 +112,7 @@ public class SocketConnection : Connection, IEquatable<SocketConnection>
 
         return true;
     }
-    
+
     internal void Close()
     {
         _socket.Close(1000);

@@ -9,11 +9,11 @@ namespace PureMemcached
         public readonly byte DataType;
         public readonly Status Status;
         public readonly uint TotalSize;
-        public readonly uint RequestId;
+        public readonly uint Opaque;
         public readonly ulong Cas;
 
         public ResponseHeader(byte magic, OpCode opCode, ushort keyLength, byte extraLength, byte dataType, Status status,
-            uint totalSize, uint requestId, ulong cas)
+            uint totalSize, uint opaque, ulong cas)
         {
             Magic = magic;
             OpCode = opCode;
@@ -22,7 +22,7 @@ namespace PureMemcached
             DataType = dataType;
             Status = status;
             TotalSize = totalSize;
-            RequestId = requestId;
+            Opaque = opaque;
             Cas = cas;
         }
     }

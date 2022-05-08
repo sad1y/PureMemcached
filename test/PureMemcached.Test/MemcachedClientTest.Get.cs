@@ -18,7 +18,7 @@ public partial class MemcachedClientTest
     public async Task Get_FailedToReadResponse_ShouldThrowException()
     {
         await using var client = CreateClient(new[] { BrokenStream() });
-        var act = async () => { await client.Get(new byte[] { 1 }, 2, 3, CancellationToken.None); };
+        var act = async () => { await client.Get(new byte[] { 1 }, 2, CancellationToken.None); };
         await act.Should().ThrowAsync<IOException>();
     }
 
@@ -27,25 +27,79 @@ public partial class MemcachedClientTest
     public async Task Get_ShouldProperlyReadResponse(uint requestId, ulong cas, byte[] key, byte[] extra, byte[] body)
     {
         await using var client = CreateClient(new[] { new StreamWrapper(CreateResponse(requestId, cas, OpCode.Get, key, extra, body)) });
-        var response = await client.Get(new byte[] { 1 }, 2, 3, CancellationToken.None);
-
-        var writer = new ArrayBufferWriter<byte>(256);
+        var response = await client.Get(new byte[] { 1 }, 2, CancellationToken.None);
 
         response.Cas.Should().Be(cas);
-        response.RequestId.Should().Be(requestId);
+        response.Opaque.Should().Be(requestId);
         response.Status.Should().Be(Status.NoError);
-        await response.CopyExtraAsync(writer, CancellationToken.None);
-        writer.WrittenMemory.ToArray().Should().BeEquivalentTo(extra);
-
-        writer.Clear();
-        await response.CopyKeyAsync(writer, CancellationToken.None);
-        writer.WrittenMemory.ToArray().Should().BeEquivalentTo(key);
+        response.Extra.ToArray().Should().BeEquivalentTo(extra);
+        response.Key.ToArray().Should().BeEquivalentTo(key);
 
         var memoryStream = new MemoryStream();
-        await response.GetStream().CopyToAsync(memoryStream);
-        
+        await response.GetBody().CopyToAsync(memoryStream);
+
         memoryStream.GetBuffer()[..body.Length].Should().BeEquivalentTo(body);
-        response.GetStream().Length.Should().Be(response.GetStream().Position);
+        response.GetBody().Length.Should().Be(response.GetBody().Position);
+    }
+
+    [Fact]
+    public async Task GetMany_WithEmptyList_ShouldProperlyReadResponse()
+    {
+        using var buffer = new MemoryStream();
+        buffer.Write(CreateResponse(0, 0, OpCode.NoOp, Array.Empty<byte>(), Array.Empty<byte>(), Array.Empty<byte>()));
+        buffer.Position = 0;
+        
+        await using var client = CreateClient(new[] { new StreamWrapper(buffer.ToArray()) });
+        await using var response = await client.Get(Array.Empty<KeyRequest>(), CancellationToken.None);
+
+        var count = 0;
+        await foreach (var item in response)
+        {
+            count++;
+        }
+
+        count.Should().Be(0);
+    }
+    
+    [Fact]
+    public async Task GetMany_WithNonEmptyIDs_ShouldProperlyReadResponse()
+    {
+        using var buffer = new MemoryStream();
+        buffer.Write(CreateResponse(1, 0, OpCode.GetKQ, Array.Empty<byte>(), new byte[] { 1, 2, 3 }, new byte[] { 4, 5, 6 }));
+        buffer.Write(CreateResponse(2, 0, OpCode.GetKQ, Array.Empty<byte>(), Array.Empty<byte>(), new byte[] { 40, 50, 60 }));
+        buffer.Write(CreateResponse(0, 0, OpCode.NoOp, Array.Empty<byte>(), Array.Empty<byte>(), Array.Empty<byte>()));
+        buffer.Position = 0;
+        
+        await using var client = CreateClient(new[] { new StreamWrapper(buffer.ToArray()) });
+        await using var response = await client.Get(new KeyRequest[]
+            {
+                new(new byte[] { 40, 50, 60 }, 2),
+                new(new byte[] { 1, 2, 3 }, 1)
+            },
+            CancellationToken.None);
+
+        await using var iterator = response.GetAsyncEnumerator();
+
+        using var body = new MemoryStream();
+
+        (await iterator.MoveNextAsync()).Should().BeTrue();
+        iterator.Current.Should().NotBeNull();
+        iterator.Current.Extra.ToArray().Should().BeEquivalentTo(new byte[] { 1, 2, 3 });
+        iterator.Current.Key.ToArray().Should().BeEquivalentTo(Array.Empty<byte>());
+        iterator.Current.Opaque.Should().Be(1);
+        await iterator.Current.GetBody().CopyToAsync(body);
+        body.ToArray().Should().BeEquivalentTo(new byte[] { 4, 5, 6 });
+        body.Position = 0;
+        
+        (await iterator.MoveNextAsync()).Should().BeTrue();
+        iterator.Current.Should().NotBeNull();
+        iterator.Current.Extra.ToArray().Should().BeEquivalentTo(Array.Empty<byte>());
+        iterator.Current.Key.ToArray().Should().BeEquivalentTo(Array.Empty<byte>());
+        iterator.Current.Opaque.Should().Be(2);
+        await iterator.Current.GetBody().CopyToAsync(body);
+        body.ToArray().Should().BeEquivalentTo(new byte[] { 40, 50, 60 });
+        
+        (await iterator.MoveNextAsync()).Should().BeFalse();
     }
 
     public static IEnumerable<object[]> GetOperationCases()
@@ -92,7 +146,7 @@ public partial class MemcachedClientTest
         BinaryPrimitives.WriteUInt32BigEndian(span[8..12], (uint)totalLength);
         BinaryPrimitives.WriteUInt32BigEndian(span[12..16], requestId);
         BinaryPrimitives.WriteUInt64BigEndian(span[16..], cas);
-
+        
         var offset = Protocol.HeaderSize;
         extra.CopyTo(span[offset..]);
         offset += extra.Length;

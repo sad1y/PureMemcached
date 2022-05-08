@@ -26,18 +26,20 @@ public class ReadOnlySocketStream : Stream
 
     public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = new())
     {
-        if (_position == _length)
+        if (_position == _length || _disposed)
             return new ValueTask<int>(0);
 
-        async ValueTask<int> ReadInternalAsync(Memory<byte> b, CancellationToken c)
+        async ValueTask<int> ReadInternalAsync(Memory<byte> writeInto, CancellationToken token)
         {
-            // AwaitableSocketAsyncEventArgs
-            var read = await _socket.ReceiveAsync(b, SocketFlags.None, c);
+            var read = await _socket.ReceiveAsync(writeInto, SocketFlags.None, token).ConfigureAwait(false);
             _position += read;
             return read;
         }
 
-        return ReadInternalAsync(buffer, cancellationToken);
+        // do not allow to read more that length
+        var size = (int)Math.Min(buffer.Length, _length - _position);   
+
+        return ReadInternalAsync(buffer[..size], cancellationToken);
     }
 
     public override ValueTask DisposeAsync()
@@ -50,11 +52,6 @@ public class ReadOnlySocketStream : Stream
 
         return new ValueTask();
     }
-    
-    protected override void Dispose(bool disposing)
-    {
-        DisposeAsync().ConfigureAwait(false).GetAwaiter().GetResult();
-    }
 
     public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException("you should use Async version");
 
@@ -65,13 +62,13 @@ public class ReadOnlySocketStream : Stream
     public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 
     public override bool CanRead => true;
-    
+
     public override bool CanSeek => false;
-    
+
     public override bool CanWrite => false;
-    
+
     public override long Length => _length;
-    
+
     public override long Position
     {
         get => _position;

@@ -101,17 +101,17 @@ public class SocketConnectionPool : IObjectPool<Connection>
 
     private async ValueTask<Connection> CreateAsync()
     {
-        var ipAddress = await GetEndpointAsync();
+        var ipAddress = await GetEndpointAsync().ConfigureAwait(false);
         var connection = new SocketConnection(ipAddress, _receiveBufferSize, _sendBufferSize, this);
-        await connection.Connect();
+        await connection.Connect().ConfigureAwait(false);
         return connection;
     }
 
     private async ValueTask<IPEndPoint> GetEndpointAsync()
     {
-        if (Environment.TickCount - _lastDnsUpdate > _dnsRefreshTimeout)
+        if ((_dnsRefreshTimeout > 0 && Environment.TickCount - _lastDnsUpdate > _dnsRefreshTimeout) || _endpoint == null)
         {
-            var ipHostInfo = await Dns.GetHostEntryAsync(_host);
+            var ipHostInfo = await Dns.GetHostEntryAsync(_host).ConfigureAwait(false);
             _endpoint = new IPEndPoint(ipHostInfo.AddressList[0], _port);
         }
 

@@ -28,9 +28,9 @@ public class SocketConnectionTest : ConnectionTestBase
                     var res = await connection.SendAsync(new MemoryStream(requestBuffer), tcs.Token);
                     res.SetLength(answerBuffer.Length);
                     var buffer = new byte[4];
-                    await res.ReadAsync(buffer.AsMemory(), tcs.Token);    
+                    await res.ReadAsync(buffer.AsMemory(), tcs.Token);
                 };
-                
+
                 await func.Should().ThrowExactlyAsync<OperationCanceledException>();
             });
     }
@@ -43,7 +43,7 @@ public class SocketConnectionTest : ConnectionTestBase
 
         await StartEnv(new ServerMock.SendReceiveMock[]
             {
-                new(answerBuffer, requestBuffer.Length)
+                new(answerBuffer, requestBuffer.Length, TimeSpan.FromSeconds(1))
             },
             async pool =>
             {
@@ -52,11 +52,9 @@ public class SocketConnectionTest : ConnectionTestBase
                     var connection = await pool.RentAsync();
                     var firstRequestTask = connection.SendAsync(new MemoryStream(requestBuffer), CancellationToken.None);
                     var secondRequestTask = connection.SendAsync(new MemoryStream(requestBuffer), CancellationToken.None);
-                    await Task.WhenAny(firstRequestTask, secondRequestTask);
+                    await Task.WhenAll(firstRequestTask, secondRequestTask);
                 };
                 await func.Should().ThrowExactlyAsync<MemcachedClientException>();
             });
     }
-    
-   
 }

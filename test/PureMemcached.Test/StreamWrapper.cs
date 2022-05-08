@@ -20,7 +20,7 @@ public class StreamWrapper : Stream
     {
     }
 
-    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = new CancellationToken())
+    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = new())
     {
         var len = Math.Min(_length - _position, buffer.Length);
         var span = _buffer.AsSpan(_position, len);

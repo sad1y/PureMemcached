@@ -9,23 +9,16 @@ namespace PureMemcached;
 /// <summary>
 /// create stream from request
 /// </summary>
-public class RequestStream : Stream
+internal class RequestStream : Stream
 {
-    private static readonly ArrayPool<byte> HeaderBufferPool;
-
     private readonly Stream _payload;
     private readonly byte[] _header;
     private readonly int _headerLength;
     private int _position;
 
-    static RequestStream()
-    {
-        HeaderBufferPool = ArrayPool<byte>.Create(512, 100);
-    }
-
     internal RequestStream(ref Request request)
     {
-        _header = HeaderBufferPool.Rent(request.Key.Length + request.Extra.Length + Protocol.HeaderSize);
+        _header = ArrayPool<byte>.Shared.Rent(request.Key.Length + request.Extra.Length + Protocol.HeaderSize);
         _payload = request.Payload ?? Null;
 
         Protocol.WriteHeader(ref request, _header, out _headerLength);
@@ -52,14 +45,14 @@ public class RequestStream : Stream
             return new ValueTask<int>(len);
         }
 
-        async ValueTask<int> ReadPayloadAsync(Memory<byte> b, CancellationToken t)
-        {
-            var len = await _payload.ReadAsync(b, t);
-            _position += len;
-            return len;
-        }
-        
         return ReadPayloadAsync(buffer, token);
+    }
+    
+    private async ValueTask<int> ReadPayloadAsync(Memory<byte> buffer, CancellationToken token)
+    {
+        var len = await _payload.ReadAsync(buffer, token).ConfigureAwait(false);
+        _position += len;
+        return len;
     }
 
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
@@ -70,7 +63,7 @@ public class RequestStream : Stream
 
     protected override void Dispose(bool disposing)
     {
-        HeaderBufferPool.Return(_header);
+        ArrayPool<byte>.Shared.Return(_header);
         base.Dispose(disposing);
     }
 

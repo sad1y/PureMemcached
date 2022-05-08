@@ -9,10 +9,11 @@ namespace PureMemcached
 {
     public class Response : IAsyncDisposable
     {
-        private static readonly byte[] DevNull = new byte[256];
+        private static readonly ArrayPool<byte> PoolBuffer = ArrayPool<byte>.Create(512, 10);
 
         private readonly ResponseHeader _header;
         private readonly Stream _stream;
+        private readonly byte[]? _headerPayload;
 
         public bool InvalidCas { get; private set; }
 
@@ -20,81 +21,65 @@ namespace PureMemcached
 
         public ulong Cas => _header.Cas;
 
-        public uint RequestId => _header.RequestId;
-
-        public uint KeyLength => _header.KeyLength;
+        public uint Opaque => _header.Opaque;
 
         public long BodyLength => _header.TotalSize - (_header.KeyLength + _header.ExtraLength);
-
-        public uint ExtraLength => _header.ExtraLength;
 
         public OpCode OpCode => _header.OpCode;
         internal long TotalSize => _header.TotalSize;
 
-        internal Response(ResponseHeader header, Stream stream)
+        internal Response(ResponseHeader header, byte[]? headerPayload, Stream stream)
         {
             _header = header;
             _stream = stream;
-        }
-
-        internal void VerifyCas(ulong cas)
-        {
-            InvalidCas = cas != 0 && Cas != cas;
+            _headerPayload = headerPayload;
         }
 
         public bool HasError() => InvalidCas || Status != Status.NoError;
 
-        public ValueTask<int> SkipKeyAsync(CancellationToken token) =>
-            Skip(_header.KeyLength + _header.ExtraLength - (int)(_stream.Position - Protocol.HeaderSize), token);
+        public ReadOnlySpan<byte> Extra => _headerPayload.AsSpan(0, _header.ExtraLength);
 
-        public ValueTask<int> SkipExtraAsync(CancellationToken token) =>
-            Skip(_header.ExtraLength - (int)(_stream.Position - Protocol.HeaderSize), token);
-
-        private ValueTask<int> Skip(int size, CancellationToken token)
-        {
-            return size <= 0 ? new ValueTask<int>(0) : _stream.ReadAsync(DevNull.AsMemory(0, size), token);
-        }
+        public ReadOnlySpan<byte> Key => _headerPayload.AsSpan(_header.ExtraLength, _header.KeyLength);
 
         /// <summary>
-        /// return raw stream from response
+        /// return body from response
         /// </summary>
         /// <returns></returns>
-        public Stream GetStream() => _stream;
+        public Stream GetBody() => _stream;
 
-        /// <summary>
-        /// read textual error from response. should be used only if GetStatus return non-zero status   
-        /// </summary>
-        /// <param name="writer"></param>
-        /// <returns>bytes read</returns>
-        public async Task CopyErrorAsync(IBufferWriter<byte> writer, CancellationToken token)
+        public ValueTask DisposeAsync()
         {
-            await SkipKeyAsync(token);
-            await _stream.CopyTo(writer, BodyLength, token);
+            if (_headerPayload != null)
+                PoolBuffer.Return(_headerPayload);
+            return _stream.DisposeAsync();
         }
 
-        /// <summary>
-        /// read extra from response. should be used first if `HasError` equals false   
-        /// </summary>
-        /// <param name="writer"></param>
-        /// <param name="token"></param>
-        /// <returns>bytes read</returns>
-        public async Task CopyExtraAsync(IBufferWriter<byte> writer, CancellationToken token)
+        internal static async ValueTask<Response> FromStream(Stream payload, CancellationToken token)
         {
-            await _stream.CopyTo(writer, ExtraLength, token);
-        }
+            var buffer = ArrayPool<byte>.Shared.Rent(Protocol.HeaderSize);
+            try
+            {
+                payload.SetLength(Protocol.HeaderSize);
+                await payload.ReadExactAsync(buffer.AsMemory(0, Protocol.HeaderSize), token).ConfigureAwait(false);
+                var header = Protocol.ReadHeader(buffer, out _);
+                payload.SetLength(header.TotalSize + Protocol.HeaderSize);
 
-        /// <summary>
-        /// read key from response. should be used after `CopyExtraAsync` method   
-        /// </summary>
-        /// <param name="writer"></param>
-        /// <param name="token"></param>
-        /// <returns>bytes read</returns>
-        public async Task CopyKeyAsync(IBufferWriter<byte> writer, CancellationToken token)
-        {
-            await SkipExtraAsync(token);
-            await _stream.CopyTo(writer, KeyLength, token);
-        }
+                var headerPayloadSize = header.ExtraLength + header.KeyLength;
 
-        public ValueTask DisposeAsync() => _stream.DisposeAsync();
+                byte[]? headerPayload = null;
+                
+                if (headerPayloadSize > 0)
+                {
+                    headerPayload = PoolBuffer.Rent(headerPayloadSize);
+                    await payload.ReadExactAsync(headerPayload.AsMemory(0, headerPayloadSize), token).ConfigureAwait(false);
+                }
+
+                return new Response(header, headerPayload, payload);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
     }
 }

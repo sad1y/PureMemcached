@@ -20,7 +20,7 @@ public class SocketConnectionPoolTest : ConnectionTestBase
              
              var secondConnection = await pool.RentAsync();
              secondConnection.Should().Be(firstConnection);
-        });
+        }, 22210);
     }
     
     [Fact]
@@ -33,6 +33,6 @@ public class SocketConnectionPoolTest : ConnectionTestBase
             await pool.ReturnAsync(firstConnection);
             var secondConnection = await pool.RentAsync();
             secondConnection.Should().NotBe(firstConnection);
-        });
+        }, 22200);
     }
 }

@@ -7,9 +7,8 @@ namespace PureMemcached.Test.FunctionalTests;
 
 public abstract class ConnectionTestBase
 {
-    protected static async Task StartEnv(IEnumerable<ServerMock.SendReceiveMock> sendReceiveMocks, Func<SocketConnectionPool, Task> clientRun)
+    protected static async Task StartEnv(IEnumerable<ServerMock.SendReceiveMock> sendReceiveMocks, Func<SocketConnectionPool, Task> clientRun, int port = 22222)
     {
-        const int port = 22222;
         using var server = new ServerMock(port);
         server.Start(sendReceiveMocks);
 

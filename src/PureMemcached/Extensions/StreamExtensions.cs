@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -8,27 +8,18 @@ namespace PureMemcached.Extensions;
 
 public static class StreamExtensions
 {
-    public static async Task ReadExactAsync(this Stream stream, Memory<byte> b, CancellationToken token)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static async Task ReadExactAsync(this Stream stream, Memory<byte> buffer, CancellationToken token)
     {
-        var read = 0;
+        var totalRead = 0;
         do
         {
-            var len = await stream.ReadAsync(b[read..], token);
-            read += len;
-        } while (read != b.Length);
-    }
-    
-    public static async Task CopyTo(this Stream stream, IBufferWriter<byte> writer, long limit, CancellationToken token)
-    {
-        const long maxChunkSize = 1024;
+            var read = await stream.ReadAsync(buffer[totalRead..], token).ConfigureAwait(false);
 
-        if (limit == 0) return;
-        while (stream.Length - stream.Position > 0 && limit != 0)
-        {
-            var span = writer.GetMemory((int)Math.Min(limit, maxChunkSize));
-            var read = await stream.ReadAsync(span[..(int)limit], token);
-            writer.Advance(read);
-            limit -= read;
-        }
+            if (read == 0)
+                throw new IOException("not enough data to copy");
+            
+            totalRead += read;
+        } while (totalRead != buffer.Length);
     }
 }

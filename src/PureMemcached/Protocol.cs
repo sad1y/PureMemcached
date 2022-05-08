@@ -12,7 +12,7 @@ internal static class Protocol
     public const int MaxKeyLength = 250;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void WriteHeader(uint requestId, ulong cas, OpCode opCode, ushort keyLength, byte extraLength, uint totalLength,
+    private static void WriteHeader(uint opaque, ulong cas, OpCode opCode, ushort keyLength, byte extraLength, uint totalLength,
         Span<byte> dest)
     {
         /*
@@ -45,7 +45,7 @@ internal static class Protocol
         BinaryPrimitives.WriteUInt16BigEndian(dest[6..8], 0); // we don't support reserved field 
 
         BinaryPrimitives.WriteUInt32BigEndian(dest[8..12], totalLength + keyLength + extraLength);
-        BinaryPrimitives.WriteUInt32BigEndian(dest[12..16], requestId);
+        BinaryPrimitives.WriteUInt32BigEndian(dest[12..16], opaque);
         BinaryPrimitives.WriteUInt64BigEndian(dest[16..24], cas);
     }
 
@@ -54,9 +54,6 @@ internal static class Protocol
     {
         if (request.Key.Length > MaxKeyLength)
             throw new ArgumentOutOfRangeException($"key size should be less or eqaul to {MaxKeyLength}");
-
-        if (request.Key.Length == 0)
-            throw new ArgumentOutOfRangeException($"key size shouldn't be eqaul to zero");
 
         if (request.Extra.Length > byte.MaxValue)
             throw new ArgumentOutOfRangeException($"extra size should be less or eqaul to {byte.MaxValue}");
@@ -68,7 +65,7 @@ internal static class Protocol
             throw new OutOfMemoryException("there is no space to write header");
 
         WriteHeader(
-            request.RequestId,
+            request.Opaque,
             request.Cas, request.OpCode,
             (ushort)request.Key.Length,
             (byte)request.Extra.Length,
